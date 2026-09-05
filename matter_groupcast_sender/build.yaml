@@ -1,0 +1,9 @@
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base-python:3.13-alpine3.21
+  amd64: ghcr.io/home-assistant/amd64-base-python:3.13-alpine3.21
+  armv7: ghcr.io/home-assistant/armv7-base-python:3.13-alpine3.21
+labels:
+  org.opencontainers.image.title: Matter Groupcast Sender
+  org.opencontainers.image.description: Host-network IPv6 multicast injector for Matter groupcast
+  org.opencontainers.image.source: https://github.com/robert-burden/ha-mot-multicast-groups
+  org.opencontainers.image.licenses: Apache-2.0

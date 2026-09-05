@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Matter groupcast light",
-        "description": "Pick a Home Assistant light helper group of Matter bulbs. On/Off uses HA's Matter Server: groupcast when the server supports it, otherwise concurrent unicast.",
+        "description": "Pick a Home Assistant light helper group of Matter bulbs. On/Off is one Matter IPv6 group multicast when the companion add-on is running and members are provisioned.",
         "data": {
           "source_entity": "Light group",
           "group_name": "Matter group name",

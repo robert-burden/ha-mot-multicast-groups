@@ -23,13 +23,18 @@ from .const import (
     CONF_GROUP_KEY_HEX,
     CONF_GROUP_KEYSET_ID,
     CONF_GROUP_NAME,
+    CONF_MSG_COUNTER,
+    CONF_SENDER_URL,
     CONF_SOURCE_ENTITY,
+    DEFAULT_CONTROLLER_NODE_ID,
     DEFAULT_GROUP_ID,
     DEFAULT_GROUP_KEYSET_ID,
     DEFAULT_GROUP_NAME,
     PRIVILEGE_ADMINISTER,
     PRIVILEGE_OPERATE,
 )
+from .group_send import GroupSendParams, encode_group_onoff, next_message_counter, send_udp_multicast
+from .sender_client import async_find_sender, async_inject_multicast, hassio_prefers_addon
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -136,12 +141,13 @@ def _merge_group_acl(existing: list[dict[str, Any]], group_id: int) -> list[dict
 
 
 class MatterGroupController:
-    """Talk to HA's Matter Server: provision groups, try groupcast, fall back to concurrent unicast."""
+    """Provision Matter groups and send On/Off as IPv6 group multicast."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
         self.last_send_path: str = "unknown"
+        self._sender_url: str | None = None
 
     @property
     def source_entity_id(self) -> str:
@@ -207,13 +213,15 @@ class MatterGroupController:
 
     async def async_turn(self, on: bool) -> None:
         command = "on" if on else "off"
-        if await self._async_try_group_command(command):
-            self.last_send_path = "groupcast"
+        if await self._async_try_plugin_groupcast(command):
+            return
+        if await self._async_try_matter_server_group_command(command):
+            self.last_send_path = "groupcast_server"
             return
         await self._async_unicast_all(command)
         self.last_send_path = "concurrent_unicast"
 
-    async def _async_try_group_command(self, command: str) -> bool:
+    async def _async_try_matter_server_group_command(self, command: str) -> bool:
         client = _get_matter_client(self.hass)
         try:
             await client.send_command(
@@ -225,9 +233,116 @@ class MatterGroupController:
                 payload={},
             )
             return True
-        except Exception as err:  # noqa: BLE001 — server has no group_command yet
-            _LOGGER.debug("group_command unavailable (%s); using concurrent unicast", err)
+        except Exception as err:  # noqa: BLE001 — official server still has no group_command
+            _LOGGER.debug("Matter Server group_command unavailable (%s)", err)
             return False
+
+    async def _async_try_plugin_groupcast(self, command: str) -> bool:
+        key_hex = self.entry.data.get(CONF_GROUP_KEY_HEX)
+        if not key_hex:
+            _LOGGER.info(
+                "No Matter group key stored yet; run matter_groupcast.provision, "
+                "then On/Off will use IPv6 group multicast"
+            )
+            return False
+
+        fabric = self._fabric_params()
+        if fabric is None:
+            _LOGGER.warning("Matter Server fabric info is missing; cannot groupcast")
+            return False
+
+        counter = next_message_counter(self.entry.data.get(CONF_MSG_COUNTER))
+        encoded = encode_group_onoff(
+            GroupSendParams(
+                fabric_id=fabric["fabric_id"],
+                compressed_fabric_id=fabric["compressed_fabric_id"],
+                source_node_id=fabric["source_node_id"],
+                group_id=self.group_id,
+                epoch_key=bytes.fromhex(key_hex),
+                command=command,
+                endpoint_id=1,
+                message_counter=counter,
+            )
+        )
+
+        sender_url = await self._async_sender_url()
+        try:
+            if sender_url:
+                await async_inject_multicast(
+                    self.hass,
+                    sender_url,
+                    encoded.multicast_address,
+                    encoded.port,
+                    encoded.packet,
+                )
+                self.last_send_path = "groupcast_addon"
+            elif hassio_prefers_addon(self.hass):
+                _LOGGER.warning(
+                    "Matter Groupcast add-on is not reachable. Install it from this "
+                    "GitHub repo (host network) so multicast can reach Thread. "
+                    "Falling back to concurrent unicast."
+                )
+                return False
+            else:
+                await self.hass.async_add_executor_job(
+                    send_udp_multicast,
+                    encoded.packet,
+                    encoded.multicast_address,
+                    encoded.port,
+                )
+                self.last_send_path = "groupcast_local"
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Plugin groupcast send failed (%s); falling back to unicast", err)
+            return False
+
+        data = dict(self.entry.data)
+        data[CONF_MSG_COUNTER] = encoded.message_counter
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+        _LOGGER.debug(
+            "Sent Matter groupcast %s to %s session=%s counter=%s via %s",
+            command,
+            encoded.multicast_address,
+            encoded.session_id,
+            encoded.message_counter,
+            self.last_send_path,
+        )
+        return True
+
+    def _fabric_params(self) -> dict[str, int] | None:
+        client = _get_matter_client(self.hass)
+        info = getattr(client, "server_info", None)
+        if info is None:
+            return None
+        if isinstance(info, dict):
+            fabric_id = info.get("fabric_id", info.get("fabricId"))
+            compressed = info.get("compressed_fabric_id", info.get("compressedFabricId"))
+            node_id = info.get("controller_node_id", info.get("controllerNodeId", info.get("node_id")))
+        else:
+            fabric_id = getattr(info, "fabric_id", None) or getattr(info, "fabricId", None)
+            compressed = getattr(info, "compressed_fabric_id", None) or getattr(
+                info, "compressedFabricId", None
+            )
+            node_id = (
+                getattr(info, "controller_node_id", None)
+                or getattr(info, "controllerNodeId", None)
+                or getattr(info, "node_id", None)
+            )
+        if fabric_id is None or compressed is None:
+            return None
+        return {
+            "fabric_id": int(fabric_id),
+            "compressed_fabric_id": int(compressed),
+            "source_node_id": int(node_id) if node_id is not None else DEFAULT_CONTROLLER_NODE_ID,
+        }
+
+    async def _async_sender_url(self) -> str | None:
+        if self._sender_url:
+            return self._sender_url
+        configured = self.entry.data.get(CONF_SENDER_URL)
+        self._sender_url = await async_find_sender(self.hass, configured)
+        if self._sender_url:
+            _LOGGER.info("Using Matter Groupcast add-on at %s", self._sender_url)
+        return self._sender_url
 
     async def _async_unicast_all(self, command: str) -> None:
         client = _get_matter_client(self.hass)

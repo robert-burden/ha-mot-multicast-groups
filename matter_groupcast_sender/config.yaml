@@ -1,0 +1,16 @@
+name: Matter Groupcast Sender
+version: "0.2.0"
+slug: matter_groupcast_sender
+description: Host-network IPv6 multicast injector for the Matter Groupcast integration
+url: https://github.com/robert-burden/ha-mot-multicast-groups
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+host_network: true
+startup: services
+ports:
+  5599/tcp: 5599
+ports_description:
+  5599/tcp: HTTP API used by the Matter Groupcast integration

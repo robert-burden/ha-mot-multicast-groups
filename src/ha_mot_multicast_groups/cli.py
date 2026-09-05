@@ -10,9 +10,14 @@ from ha_mot_multicast_groups.config import ROOT, load_settings
 from ha_mot_multicast_groups.discover import discover_group, format_table
 from ha_mot_multicast_groups.ha_client import HomeAssistantClient
 from ha_mot_multicast_groups.matter_client import MatterClient, MatterError
+from ha_mot_multicast_groups.group_send import (
+    GroupSendParams,
+    encode_group_onoff,
+    next_message_counter,
+    send_udp_multicast,
+)
 from ha_mot_multicast_groups.provision import (
     generate_group_key,
-    group_onoff,
     provision_node,
     unicast_onoff,
 )
@@ -135,16 +140,41 @@ async def cmd_join_group(args: argparse.Namespace) -> int:
 
 async def cmd_group(args: argparse.Namespace) -> int:
     settings = load_settings()
+    if not settings.group_key_hex:
+        print("MATTER_GROUP_KEY_HEX is empty. Run join-group first so the key matches the bulbs.")
+        return 1
+    counter_path = ROOT / ".group_msg_counter"
+    previous = int(counter_path.read_text().strip()) if counter_path.exists() else None
     async with await _ha_session() as session:
         async with MatterClient(settings.matter_ws_url, session) as matter:
-            try:
-                result = await group_onoff(matter, settings, args.command)
-                print(f"group {hex(settings.group_id)} {args.command} via node {hex(settings.group_node_id)}")
-                print(result)
-                return 0
-            except (MatterError, RuntimeError) as exc:
-                print(f"group command failed: {exc}")
+            info = matter.server_info or {}
+            fabric_id = info.get("fabric_id", info.get("fabricId"))
+            compressed = info.get("compressed_fabric_id", info.get("compressedFabricId"))
+            node_id = info.get("controller_node_id", info.get("controllerNodeId", 112233))
+            if fabric_id is None or compressed is None:
+                print(f"Matter Server hello is missing fabric ids: {info}")
                 return 1
+            encoded = encode_group_onoff(
+                GroupSendParams(
+                    fabric_id=int(fabric_id),
+                    compressed_fabric_id=int(compressed),
+                    source_node_id=int(node_id),
+                    group_id=settings.group_id,
+                    epoch_key=bytes.fromhex(settings.group_key_hex),
+                    command=args.command,
+                    endpoint_id=1,
+                    message_counter=next_message_counter(previous),
+                )
+            )
+            send_udp_multicast(encoded.packet, encoded.multicast_address, encoded.port)
+            counter_path.write_text(str(encoded.message_counter) + "\n")
+            print(
+                f"group {hex(settings.group_id)} {args.command} -> "
+                f"[{encoded.multicast_address}]:{encoded.port} "
+                f"session={hex(encoded.session_id)} counter={encoded.message_counter} "
+                f"bytes={len(encoded.packet)}"
+            )
+            return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -171,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--continue-on-error", action="store_true")
     p.set_defaults(func=cmd_join_group)
 
-    p = sub.add_parser("group", help="Send On/Off to the Matter group NodeId")
+    p = sub.add_parser("group", help="Send On/Off as Matter IPv6 group multicast from this machine")
     p.add_argument("command", choices=["on", "off", "toggle"])
     p.set_defaults(func=cmd_group)
 

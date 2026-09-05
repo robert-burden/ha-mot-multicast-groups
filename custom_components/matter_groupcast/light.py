@@ -22,7 +22,7 @@ async def async_setup_entry(
 
 
 class MatterGroupcastLight(LightEntity):
-    """Light that tries Matter groupcast, then concurrent unicast."""
+    """Light that sends Matter groupcast On/Off, with concurrent unicast fallback."""
 
     _attr_supported_color_modes = {ColorMode.ONOFF}
     _attr_color_mode = ColorMode.ONOFF

@@ -7,4 +7,4 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
-group-key.json
+.group_msg_counter
