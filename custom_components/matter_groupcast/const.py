@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+DOMAIN = "matter_groupcast"
+PLATFORMS = ["light"]
+
+CONF_SOURCE_ENTITY = "source_entity"
+CONF_GROUP_ID = "group_id"
+CONF_GROUP_NAME = "group_name"
+CONF_GROUP_KEYSET_ID = "group_keyset_id"
+CONF_GROUP_KEY_HEX = "group_key_hex"
+
+DEFAULT_GROUP_ID = 0x0D01
+DEFAULT_GROUP_KEYSET_ID = 42
+DEFAULT_GROUP_NAME = "DiningChandelier"
+
+CLUSTER_GROUPS = 0x0004
+CLUSTER_ONOFF = 0x0006
+CLUSTER_GROUP_KEY_MANAGEMENT = 0x003F
+
+AUTH_MODE_CASE = 2
+AUTH_MODE_GROUP = 3
+PRIVILEGE_OPERATE = 3
+PRIVILEGE_ADMINISTER = 5
+
+SERVICE_PROVISION = "provision"

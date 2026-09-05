@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Matter groupcast light",
+        "description": "Pick a Home Assistant light helper group of Matter bulbs. On/Off uses HA's Matter Server: groupcast when the server supports it, otherwise concurrent unicast.",
+        "data": {
+          "source_entity": "Light group",
+          "group_name": "Matter group name",
+          "group_id": "Matter Group ID"
+        }
+      }
+    },
+    "error": {
+      "not_a_group": "That entity is not a light group (it has no member entity_id list)."
+    },
+    "abort": {
+      "matter_not_setup": "Set up the official Matter integration first.",
+      "already_configured": "This light group is already configured."
+    }
+  }
+}

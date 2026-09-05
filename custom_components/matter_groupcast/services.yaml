@@ -1,0 +1,10 @@
+provision:
+  name: Provision Matter group
+  description: Write group keys, membership, and a fabric-safe ACL on all available members of the helper group.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: Optional. If omitted, every loaded Matter Groupcast entry is provisioned.
+      required: false
+      selector:
+        text:
