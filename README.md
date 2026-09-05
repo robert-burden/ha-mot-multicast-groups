@@ -9,7 +9,7 @@ Official Matter Server still treats Group NodeIds as test nodes, so `device_comm
 [`custom_components/matter_groupcast`](custom_components/matter_groupcast) adds a light entity for a helper group of Matter bulbs.
 
 1. `matter_groupcast.provision` writes group keys, membership, and a fabric-safe ACL on each member (same flow proven on Bulb 1).
-2. On/Off encodes one Matter group message in the integration (operational key, AES-CCM, Invoke On/Off).
+2. On/Off, brightness, color, and color temperature encode Matter group messages in the integration (operational key, AES-CCM, Invoke).
 3. The **Matter Groupcast Sender** add-on (`host_network: true`) injects that UDP datagram to `ff35:0040:fd…` port **5540**.
 4. If the add-on is not running, it falls back to concurrent unicast (popcorn).
 
@@ -39,7 +39,7 @@ Home Assistant Core cannot put site-local IPv6 multicast onto the Thread backbon
 2. Toggle `light.*_matter_group`. `send_path` should become `groupcast_addon`.
 3. All provisioned members should switch together. Unprovisioned members will not hear the multicast.
 
-On/Off only. No brightness or color groupcast in v1.
+On/Off, brightness, color (HS/XY/RGB), and color temperature. Transitions are supported (Matter tenths of a second).
 
 ### Manual integration install
 
@@ -61,6 +61,8 @@ matter-groups discover
 matter-groups unicast toggle --entity light.dining_room_bulb_1
 matter-groups join-group --limit 1
 matter-groups group on
+matter-groups group on --brightness 180 --kelvin 2700
+matter-groups group on --hs 30,80
 ```
 
 `group on|off|toggle` now sends a real Matter group multicast from this machine (needs IPv6 to the LAN/OTBR). Use the same `MATTER_GROUP_KEY_HEX` you provisioned. Do not mix laptop `join-group` on all 32 bulbs with a different key than the HA config entry.

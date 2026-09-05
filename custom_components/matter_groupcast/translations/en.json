@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Matter groupcast light",
-        "description": "Pick a Home Assistant light helper group of Matter bulbs. On/Off is one Matter IPv6 group multicast when the companion add-on is running and members are provisioned.",
+        "description": "Pick a Home Assistant light helper group of Matter bulbs. On/Off, brightness, color, and color temperature use Matter IPv6 group multicast when the companion add-on is running and members are provisioned.",
         "data": {
           "source_entity": "Light group",
           "group_name": "Matter group name",

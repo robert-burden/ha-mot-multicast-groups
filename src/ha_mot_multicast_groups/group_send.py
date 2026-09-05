@@ -19,21 +19,29 @@ _module = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _module
 _spec.loader.exec_module(_module)
 
+ClusterInvoke = _module.ClusterInvoke
 EncodedGroupMessage = _module.EncodedGroupMessage
 GroupSendParams = _module.GroupSendParams
 derive_group_session_id = _module.derive_group_session_id
 derive_operational_key = _module.derive_operational_key
+encode_group_invoke = _module.encode_group_invoke
 encode_group_onoff = _module.encode_group_onoff
+invoke_onoff = _module.invoke_onoff
+invokes_for_turn_on = _module.invokes_for_turn_on
 multicast_address_for = _module.multicast_address_for
 next_message_counter = _module.next_message_counter
 send_udp_multicast = _module.send_udp_multicast
 
 __all__ = [
+    "ClusterInvoke",
     "EncodedGroupMessage",
     "GroupSendParams",
     "derive_group_session_id",
     "derive_operational_key",
+    "encode_group_invoke",
     "encode_group_onoff",
+    "invoke_onoff",
+    "invokes_for_turn_on",
     "multicast_address_for",
     "next_message_counter",
     "send_udp_multicast",

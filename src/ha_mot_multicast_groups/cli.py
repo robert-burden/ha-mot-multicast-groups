@@ -12,7 +12,9 @@ from ha_mot_multicast_groups.ha_client import HomeAssistantClient
 from ha_mot_multicast_groups.matter_client import MatterClient, MatterError
 from ha_mot_multicast_groups.group_send import (
     GroupSendParams,
-    encode_group_onoff,
+    encode_group_invoke,
+    invoke_onoff,
+    invokes_for_turn_on,
     next_message_counter,
     send_udp_multicast,
 )
@@ -154,26 +156,46 @@ async def cmd_group(args: argparse.Namespace) -> int:
             if fabric_id is None or compressed is None:
                 print(f"Matter Server hello is missing fabric ids: {info}")
                 return 1
-            encoded = encode_group_onoff(
-                GroupSendParams(
-                    fabric_id=int(fabric_id),
-                    compressed_fabric_id=int(compressed),
-                    source_node_id=int(node_id),
-                    group_id=settings.group_id,
-                    epoch_key=bytes.fromhex(settings.group_key_hex),
-                    command=args.command,
-                    endpoint_id=1,
-                    message_counter=next_message_counter(previous),
+            if args.command == "off":
+                invokes = [invoke_onoff("off")]
+            elif args.command == "toggle":
+                invokes = [invoke_onoff("toggle")]
+            else:
+                hs_color = None
+                if args.hs:
+                    hue, sat = (float(part) for part in args.hs.split(",", 1))
+                    hs_color = (hue, sat)
+                invokes = invokes_for_turn_on(
+                    brightness=args.brightness,
+                    hs_color=hs_color,
+                    kelvin=args.kelvin,
                 )
-            )
-            send_udp_multicast(encoded.packet, encoded.multicast_address, encoded.port)
-            counter_path.write_text(str(encoded.message_counter) + "\n")
-            print(
-                f"group {hex(settings.group_id)} {args.command} -> "
-                f"[{encoded.multicast_address}]:{encoded.port} "
-                f"session={hex(encoded.session_id)} counter={encoded.message_counter} "
-                f"bytes={len(encoded.packet)}"
-            )
+            counter = next_message_counter(previous)
+            last = None
+            for invoke in invokes:
+                encoded = encode_group_invoke(
+                    GroupSendParams(
+                        fabric_id=int(fabric_id),
+                        compressed_fabric_id=int(compressed),
+                        source_node_id=int(node_id),
+                        group_id=settings.group_id,
+                        epoch_key=bytes.fromhex(settings.group_key_hex),
+                        endpoint_id=1,
+                        message_counter=counter,
+                    ),
+                    invoke,
+                )
+                send_udp_multicast(encoded.packet, encoded.multicast_address, encoded.port)
+                print(
+                    f"group {hex(settings.group_id)} {invoke.command_name} -> "
+                    f"[{encoded.multicast_address}]:{encoded.port} "
+                    f"session={hex(encoded.session_id)} counter={encoded.message_counter} "
+                    f"bytes={len(encoded.packet)}"
+                )
+                last = encoded
+                counter = next_message_counter(encoded.message_counter)
+            if last is not None:
+                counter_path.write_text(str(last.message_counter) + "\n")
             return 0
 
 
@@ -201,8 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--continue-on-error", action="store_true")
     p.set_defaults(func=cmd_join_group)
 
-    p = sub.add_parser("group", help="Send On/Off as Matter IPv6 group multicast from this machine")
+    p = sub.add_parser("group", help="Send On/Off, brightness, or color as Matter IPv6 group multicast")
     p.add_argument("command", choices=["on", "off", "toggle"])
+    p.add_argument("--brightness", type=int, help="HA brightness 1-255")
+    p.add_argument("--kelvin", type=int, help="Color temperature in Kelvin")
+    p.add_argument("--hs", help="Hue,saturation (HA units, e.g. 30,80)")
     p.set_defaults(func=cmd_group)
 
     return parser

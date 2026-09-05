@@ -1,6 +1,6 @@
 [project]
 name = "ha-mot-multicast-groups"
-version = "0.1.0"
+version = "0.3.0"
 description = "PoC for Matter group multicast control of Home Assistant Thread lights"
 readme = "README.md"
 requires-python = ">=3.11"

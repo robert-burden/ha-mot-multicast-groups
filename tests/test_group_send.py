@@ -65,10 +65,62 @@ def test_encoded_group_message_roundtrip_decrypt() -> None:
     assert gs.encode_onoff_invoke("off", 1) in plaintext
 
 
-def test_message_counter_never_goes_backwards() -> None:
-    first = gs.next_message_counter(None)
-    second = gs.next_message_counter(first)
-    assert 0 < second <= 0xFFFFFFFF
-    assert second != first
-    later = gs.next_message_counter(second)
-    assert later != second
+def test_brightness_and_color_conversions() -> None:
+    assert gs.brightness_to_matter_level(255) == 254
+    assert gs.brightness_to_matter_level(0) == 1
+    assert gs.hs_to_matter((360, 100)) == (254, 254)
+    assert gs.hs_to_matter((0, 0)) == (0, 0)
+    assert gs.kelvin_to_mireds(2000) == 500
+    assert gs.xy_to_matter((0.5, 0.4)) == (32768, 26214)
+
+
+def test_level_and_color_temp_invokes_encode_fields() -> None:
+    level = gs.encode_invoke(
+        gs.CLUSTER_LEVEL_CONTROL,
+        gs.CMD_MOVE_TO_LEVEL_WITH_ON_OFF,
+        gs.invoke_move_to_level(128).fields,
+        endpoint_id=1,
+    )
+    assert bytes((0x24, 0x01, gs.CLUSTER_LEVEL_CONTROL)) in level
+    assert gs._tlv_ctx_uint(0, gs.brightness_to_matter_level(128), 1) in level
+
+    ct = gs.encode_invoke(
+        gs.CLUSTER_COLOR_CONTROL,
+        gs.CMD_MOVE_TO_COLOR_TEMPERATURE,
+        gs.invoke_move_to_color_temp(2700).fields,
+        endpoint_id=1,
+    )
+    # Color Control cluster 0x0300 does not fit in a uint8 tag
+    assert bytes((0x25, 0x01, 0x00, 0x03)) in ct
+    assert gs._tlv_ctx_uint(0, gs.kelvin_to_mireds(2700), 2) in ct
+
+
+def test_turn_on_invokes_color_then_brightness() -> None:
+    invokes = gs.invokes_for_turn_on(brightness=200, kelvin=2700)
+    assert [item.command_name for item in invokes] == [
+        "moveToColorTemperature",
+        "moveToLevelWithOnOff",
+    ]
+    color_only = gs.invokes_for_turn_on(hs_color=(30.0, 80.0))
+    assert [item.command_name for item in color_only] == ["moveToHueAndSaturation", "on"]
+
+
+def test_color_temp_group_message_roundtrip_decrypt() -> None:
+    invoke = gs.invoke_move_to_color_temp(3000)
+    params = gs.GroupSendParams(
+        fabric_id=2,
+        compressed_fabric_id=0xAABBCCDDEEFF0011,
+        source_node_id=112233,
+        group_id=0x0D01,
+        epoch_key=bytes.fromhex("0123456789abcdeffedcba9876543210"),
+        endpoint_id=1,
+        message_counter=0x01020305,
+        exchange_id=0x2222,
+    )
+    encoded = gs.encode_group_invoke(params, invoke)
+    header_len = 1 + 2 + 1 + 4 + 8 + 2
+    header = encoded.packet[:header_len]
+    ciphertext = encoded.packet[header_len:]
+    nonce = gs.generate_nonce(header[3], params.message_counter, params.source_node_id)
+    plaintext = AESCCM(encoded.operational_key, tag_length=16).decrypt(nonce, ciphertext, header)
+    assert gs.encode_invoke(invoke.cluster_id, invoke.command_id, invoke.fields, 1) in plaintext

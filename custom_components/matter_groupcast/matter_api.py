@@ -18,7 +18,6 @@ from .const import (
     AUTH_MODE_GROUP,
     CLUSTER_GROUP_KEY_MANAGEMENT,
     CLUSTER_GROUPS,
-    CLUSTER_ONOFF,
     CONF_GROUP_ID,
     CONF_GROUP_KEY_HEX,
     CONF_GROUP_KEYSET_ID,
@@ -33,7 +32,16 @@ from .const import (
     PRIVILEGE_ADMINISTER,
     PRIVILEGE_OPERATE,
 )
-from .group_send import GroupSendParams, encode_group_onoff, next_message_counter, send_udp_multicast
+from .group_send import (
+    ClusterInvoke,
+    EncodedGroupMessage,
+    GroupSendParams,
+    encode_group_invoke,
+    invoke_onoff,
+    invokes_for_turn_on,
+    next_message_counter,
+    send_udp_multicast,
+)
 from .sender_client import async_find_sender, async_inject_multicast, hassio_prefers_addon
 
 _LOGGER = logging.getLogger(__name__)
@@ -141,7 +149,7 @@ def _merge_group_acl(existing: list[dict[str, Any]], group_id: int) -> list[dict
 
 
 class MatterGroupController:
-    """Provision Matter groups and send On/Off as IPv6 group multicast."""
+    """Provision Matter groups and send light commands as IPv6 group multicast."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -211,38 +219,40 @@ class MatterGroupController:
             return None
         return any(s.state == "on" for s in known)
 
-    async def async_turn(self, on: bool) -> None:
-        command = "on" if on else "off"
-        if await self._async_try_plugin_groupcast(command):
+    async def async_turn_off(self) -> None:
+        await self.async_apply([invoke_onoff("off")])
+
+    async def async_turn_on(
+        self,
+        *,
+        brightness: int | None = None,
+        hs_color: tuple[float, float] | None = None,
+        xy_color: tuple[float, float] | None = None,
+        kelvin: int | None = None,
+        transition_s: float | None = 0,
+    ) -> None:
+        await self.async_apply(
+            invokes_for_turn_on(
+                brightness=brightness,
+                hs_color=hs_color,
+                xy_color=xy_color,
+                kelvin=kelvin,
+                transition_s=transition_s,
+            )
+        )
+
+    async def async_apply(self, invokes: list[ClusterInvoke]) -> None:
+        if await self._async_try_plugin_groupcast(invokes):
             return
-        if await self._async_try_matter_server_group_command(command):
-            self.last_send_path = "groupcast_server"
-            return
-        await self._async_unicast_all(command)
+        await self._async_unicast_invokes(invokes)
         self.last_send_path = "concurrent_unicast"
 
-    async def _async_try_matter_server_group_command(self, command: str) -> bool:
-        client = _get_matter_client(self.hass)
-        try:
-            await client.send_command(
-                "group_command",
-                group_id=self.group_id,
-                endpoint_id=1,
-                cluster_id=CLUSTER_ONOFF,
-                command_name=command,
-                payload={},
-            )
-            return True
-        except Exception as err:  # noqa: BLE001 — official server still has no group_command
-            _LOGGER.debug("Matter Server group_command unavailable (%s)", err)
-            return False
-
-    async def _async_try_plugin_groupcast(self, command: str) -> bool:
+    async def _async_try_plugin_groupcast(self, invokes: list[ClusterInvoke]) -> bool:
         key_hex = self.entry.data.get(CONF_GROUP_KEY_HEX)
         if not key_hex:
             _LOGGER.info(
                 "No Matter group key stored yet; run matter_groupcast.provision, "
-                "then On/Off will use IPv6 group multicast"
+                "then light commands will use IPv6 group multicast"
             )
             return False
 
@@ -251,61 +261,69 @@ class MatterGroupController:
             _LOGGER.warning("Matter Server fabric info is missing; cannot groupcast")
             return False
 
-        counter = next_message_counter(self.entry.data.get(CONF_MSG_COUNTER))
-        encoded = encode_group_onoff(
-            GroupSendParams(
-                fabric_id=fabric["fabric_id"],
-                compressed_fabric_id=fabric["compressed_fabric_id"],
-                source_node_id=fabric["source_node_id"],
-                group_id=self.group_id,
-                epoch_key=bytes.fromhex(key_hex),
-                command=command,
-                endpoint_id=1,
-                message_counter=counter,
-            )
-        )
-
         sender_url = await self._async_sender_url()
+        if not sender_url and hassio_prefers_addon(self.hass):
+            _LOGGER.warning(
+                "Matter Groupcast add-on is not reachable. Install it from this "
+                "GitHub repo (host network) so multicast can reach Thread. "
+                "Falling back to concurrent unicast."
+            )
+            return False
+
+        counter = next_message_counter(self.entry.data.get(CONF_MSG_COUNTER))
+        encoded_packets: list[tuple[ClusterInvoke, EncodedGroupMessage]] = []
+        epoch_key = bytes.fromhex(key_hex)
+        for invoke in invokes:
+            encoded = encode_group_invoke(
+                GroupSendParams(
+                    fabric_id=fabric["fabric_id"],
+                    compressed_fabric_id=fabric["compressed_fabric_id"],
+                    source_node_id=fabric["source_node_id"],
+                    group_id=self.group_id,
+                    epoch_key=epoch_key,
+                    endpoint_id=1,
+                    message_counter=counter,
+                ),
+                invoke,
+            )
+            encoded_packets.append((invoke, encoded))
+            counter = next_message_counter(encoded.message_counter)
+
         try:
-            if sender_url:
-                await async_inject_multicast(
-                    self.hass,
-                    sender_url,
+            for invoke, encoded in encoded_packets:
+                if sender_url:
+                    await async_inject_multicast(
+                        self.hass,
+                        sender_url,
+                        encoded.multicast_address,
+                        encoded.port,
+                        encoded.packet,
+                    )
+                    self.last_send_path = "groupcast_addon"
+                else:
+                    await self.hass.async_add_executor_job(
+                        send_udp_multicast,
+                        encoded.packet,
+                        encoded.multicast_address,
+                        encoded.port,
+                    )
+                    self.last_send_path = "groupcast_local"
+                _LOGGER.debug(
+                    "Sent Matter groupcast %s to %s session=%s counter=%s via %s",
+                    invoke.command_name,
                     encoded.multicast_address,
-                    encoded.port,
-                    encoded.packet,
+                    encoded.session_id,
+                    encoded.message_counter,
+                    self.last_send_path,
                 )
-                self.last_send_path = "groupcast_addon"
-            elif hassio_prefers_addon(self.hass):
-                _LOGGER.warning(
-                    "Matter Groupcast add-on is not reachable. Install it from this "
-                    "GitHub repo (host network) so multicast can reach Thread. "
-                    "Falling back to concurrent unicast."
-                )
-                return False
-            else:
-                await self.hass.async_add_executor_job(
-                    send_udp_multicast,
-                    encoded.packet,
-                    encoded.multicast_address,
-                    encoded.port,
-                )
-                self.last_send_path = "groupcast_local"
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Plugin groupcast send failed (%s); falling back to unicast", err)
             return False
 
+        last_counter = encoded_packets[-1][1].message_counter
         data = dict(self.entry.data)
-        data[CONF_MSG_COUNTER] = encoded.message_counter
+        data[CONF_MSG_COUNTER] = last_counter
         self.hass.config_entries.async_update_entry(self.entry, data=data)
-        _LOGGER.debug(
-            "Sent Matter groupcast %s to %s session=%s counter=%s via %s",
-            command,
-            encoded.multicast_address,
-            encoded.session_id,
-            encoded.message_counter,
-            self.last_send_path,
-        )
         return True
 
     def _fabric_params(self) -> dict[str, int] | None:
@@ -344,25 +362,24 @@ class MatterGroupController:
             _LOGGER.info("Using Matter Groupcast add-on at %s", self._sender_url)
         return self._sender_url
 
-    async def _async_unicast_all(self, command: str) -> None:
+    async def _async_unicast_invokes(self, invokes: list[ClusterInvoke]) -> None:
         client = _get_matter_client(self.hass)
         members = [m for m in self.async_members() if m.available]
         if not members:
             raise HomeAssistantError("No available Matter members to command")
-        results = await asyncio.gather(
-            *(
-                client.send_command(
-                    "device_command",
-                    node_id=member.node_id,
-                    endpoint_id=member.endpoint_id,
-                    cluster_id=CLUSTER_ONOFF,
-                    command_name=command,
-                    payload={},
-                )
-                for member in members
-            ),
-            return_exceptions=True,
-        )
+        tasks = [
+            client.send_command(
+                "device_command",
+                node_id=member.node_id,
+                endpoint_id=member.endpoint_id,
+                cluster_id=invoke.cluster_id,
+                command_name=invoke.command_name,
+                payload=invoke.payload,
+            )
+            for invoke in invokes
+            for member in members
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         errors = [r for r in results if isinstance(r, Exception)]
         if errors and len(errors) == len(results):
             raise HomeAssistantError(f"All Matter unicast commands failed: {errors[0]}")
