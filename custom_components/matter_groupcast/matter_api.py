@@ -244,8 +244,18 @@ class MatterGroupController:
     async def async_apply(self, invokes: list[ClusterInvoke]) -> None:
         if await self._async_try_plugin_groupcast(invokes):
             return
-        await self._async_unicast_invokes(invokes)
+        # Dozens of Thread unicasts can block the UI for a minute each when
+        # sessions are dead. Cap the wait so a missed add-on does not look like
+        # a frozen toggle.
+        timeout = 8 if hassio_prefers_addon(self.hass) else 60
         self.last_send_path = "concurrent_unicast"
+        try:
+            await asyncio.wait_for(self._async_unicast_invokes(invokes), timeout=timeout)
+        except TimeoutError:
+            _LOGGER.warning(
+                "Unicast fallback timed out after %ss; lights may not have changed",
+                timeout,
+            )
 
     async def _async_try_plugin_groupcast(self, invokes: list[ClusterInvoke]) -> bool:
         key_hex = self.entry.data.get(CONF_GROUP_KEY_HEX)
@@ -323,6 +333,8 @@ class MatterGroupController:
         last_counter = encoded_packets[-1][1].message_counter
         data = dict(self.entry.data)
         data[CONF_MSG_COUNTER] = last_counter
+        if sender_url:
+            data[CONF_SENDER_URL] = sender_url
         self.hass.config_entries.async_update_entry(self.entry, data=data)
         return True
 

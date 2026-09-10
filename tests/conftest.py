@@ -8,10 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 GROUP_SEND = ROOT / "custom_components" / "matter_groupcast" / "group_send.py"
+SENDER_URLS = ROOT / "custom_components" / "matter_groupcast" / "sender_urls.py"
 
 
-def _load_group_send():
-    spec = importlib.util.spec_from_file_location("matter_groupcast_group_send", GROUP_SEND)
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -19,4 +20,5 @@ def _load_group_send():
     return module
 
 
-group_send = _load_group_send()
+group_send = _load(GROUP_SEND, "matter_groupcast_group_send")
+sender_urls = _load(SENDER_URLS, "matter_groupcast_sender_urls")

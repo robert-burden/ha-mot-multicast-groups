@@ -6,41 +6,65 @@ import logging
 from typing import Any
 from urllib.parse import urlparse
 
-from aiohttp import ClientTimeout
+import aiohttp
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.hassio import is_hassio
+
+from .sender_urls import (
+    ADDON_PORT,
+    ADDON_SLUG_SUFFIX,
+    addon_hosts_from_info,
+    build_sender_urls,
+    hyphenate_slug,
+    lan_hosts_from_network_info,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-ADDON_PORT = 5599
-SEND_TIMEOUT = ClientTimeout(total=2.0)
+SEND_TIMEOUT = aiohttp.ClientTimeout(total=2.0, sock_connect=0.6)
 
 
 def candidate_sender_urls(hass: HomeAssistant, configured: str | None = None) -> list[str]:
-    urls: list[str] = []
-    if configured:
-        urls.append(configured.rstrip("/"))
-    urls.extend(
-        [
-            f"http://127.0.0.1:{ADDON_PORT}",
-            f"http://homeassistant.local:{ADDON_PORT}",
-            f"http://matter_groupcast_sender:{ADDON_PORT}",
-            f"http://supervisor:{ADDON_PORT}",
-            f"http://172.30.32.1:{ADDON_PORT}",
-        ]
+    extra: list[str] = []
+    extra.extend(_supervisor_addon_hosts(hass))
+    extra.extend(_supervisor_lan_hosts(hass))
+    return build_sender_urls(
+        configured=configured,
+        extra_hosts=extra,
+        hass_host=_hass_host(hass),
     )
-    host = _hass_host(hass)
-    if host:
-        urls.append(f"http://{host}:{ADDON_PORT}")
-    # Preserve order, drop duplicates.
-    seen: set[str] = set()
-    out: list[str] = []
-    for url in urls:
-        if url not in seen:
-            seen.add(url)
-            out.append(url)
-    return out
+
+
+def _supervisor_addon_hosts(hass: HomeAssistant) -> list[str]:
+    try:
+        from homeassistant.components.hassio import get_addons_info, hostname_from_addon_slug
+    except ImportError:
+        return []
+    try:
+        addons = get_addons_info(hass)
+    except Exception:  # noqa: BLE001
+        return []
+    hosts = addon_hosts_from_info(addons if isinstance(addons, dict) else None)
+    if isinstance(addons, dict):
+        for slug in addons:
+            slug_s = str(slug)
+            if ADDON_SLUG_SUFFIX in slug_s:
+                try:
+                    hosts.append(hostname_from_addon_slug(slug_s))
+                except Exception:  # noqa: BLE001
+                    hosts.append(hyphenate_slug(slug_s))
+    return hosts
+
+
+def _supervisor_lan_hosts(hass: HomeAssistant) -> list[str]:
+    try:
+        from homeassistant.components.hassio import get_network_info
+    except ImportError:
+        return []
+    try:
+        info = get_network_info(hass)
+    except Exception:  # noqa: BLE001
+        return []
+    return lan_hosts_from_network_info(info)
 
 
 def _hass_host(hass: HomeAssistant) -> str | None:
@@ -58,16 +82,24 @@ def _hass_host(hass: HomeAssistant) -> str | None:
 
 
 async def async_find_sender(hass: HomeAssistant, configured: str | None = None) -> str | None:
-    session = async_get_clientsession(hass)
-    for url in candidate_sender_urls(hass, configured):
-        try:
-            async with session.get(f"{url}/health", timeout=SEND_TIMEOUT) as resp:
-                if resp.status == 200:
+    urls = candidate_sender_urls(hass, configured)
+    async with aiohttp.ClientSession(timeout=SEND_TIMEOUT) as session:
+        for url in urls:
+            try:
+                async with session.get(f"{url}/health") as resp:
+                    if resp.status != 200:
+                        continue
                     payload = await resp.json(content_type=None)
                     if payload.get("ok"):
+                        _LOGGER.info("Matter Groupcast sender reachable at %s", url)
                         return url
-        except Exception:  # noqa: BLE001 — probe a list of possible add-on URLs
-            continue
+            except Exception as err:  # noqa: BLE001 — probe a list of possible add-on URLs
+                _LOGGER.debug("Sender probe failed for %s: %s", url, err)
+                continue
+    _LOGGER.warning(
+        "Matter Groupcast sender not reachable. Probed: %s",
+        ", ".join(urls),
+    )
     return None
 
 
@@ -78,22 +110,24 @@ async def async_inject_multicast(
     port: int,
     packet: bytes,
 ) -> None:
-    session = async_get_clientsession(hass)
-    async with session.post(
-        f"{sender_url.rstrip('/')}/multicast",
-        json={"address": address, "port": port, "packet": packet.hex()},
-        timeout=SEND_TIMEOUT,
-    ) as resp:
-        if resp.status != 200:
-            text = await resp.text()
-            raise RuntimeError(f"Groupcast add-on returned HTTP {resp.status}: {text[:200]}")
-        payload: dict[str, Any] = await resp.json(content_type=None)
-        if not payload.get("ok"):
-            raise RuntimeError(payload.get("error") or "Groupcast add-on send failed")
+    del hass  # API keeps hass for call-site compatibility with other HA clients.
+    async with aiohttp.ClientSession(timeout=SEND_TIMEOUT) as session:
+        async with session.post(
+            f"{sender_url.rstrip('/')}/multicast",
+            json={"address": address, "port": port, "packet": packet.hex()},
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"Groupcast add-on returned HTTP {resp.status}: {text[:200]}")
+            payload: dict[str, Any] = await resp.json(content_type=None)
+            if not payload.get("ok"):
+                raise RuntimeError(payload.get("error") or "Groupcast add-on send failed")
 
 
 def hassio_prefers_addon(hass: HomeAssistant) -> bool:
     try:
+        from homeassistant.helpers.hassio import is_hassio
+
         return bool(is_hassio(hass))
     except Exception:  # noqa: BLE001
         return False

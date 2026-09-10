@@ -5,6 +5,7 @@ import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 
 from tests.conftest import group_send as gs
+from tests.conftest import sender_urls as su
 
 
 def test_multicast_address_matches_spec_for_fabric_2() -> None:
@@ -124,3 +125,20 @@ def test_color_temp_group_message_roundtrip_decrypt() -> None:
     nonce = gs.generate_nonce(header[3], params.message_counter, params.source_node_id)
     plaintext = AESCCM(encoded.operational_key, tag_length=16).decrypt(nonce, ciphertext, header)
     assert gs.encode_invoke(invoke.cluster_id, invoke.command_id, invoke.fields, 1) in plaintext
+
+
+def test_sender_urls_prefer_supervisor_hostname() -> None:
+    extra = su.addon_hosts_from_info(
+        {
+            "1c2d22dc_matter_groupcast_sender": {
+                "hostname": "1c2d22dc-matter-groupcast-sender",
+                "ip_address": "172.30.32.1",
+            }
+        }
+    )
+    urls = su.build_sender_urls(extra_hosts=extra)
+    assert urls[0] == "http://1c2d22dc-matter-groupcast-sender:5599"
+    assert "http://1c2d22dc-matter-groupcast-sender.local.hass.io:5599" in urls
+    assert urls.index("http://1c2d22dc-matter-groupcast-sender:5599") < urls.index(
+        "http://homeassistant.local:5599"
+    )
