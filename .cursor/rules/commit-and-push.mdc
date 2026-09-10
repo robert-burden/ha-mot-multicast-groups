@@ -1,0 +1,10 @@
+---
+description: Always commit and push completed work on the current branch
+alwaysApply: true
+---
+
+# Commit and push
+
+After finishing implementation or fixes in this repo, create a git commit and `git push` the current branch to origin. Do not wait to be asked.
+
+Follow the repo commit protocol: review `git status`, `git diff`, and recent log; write a why-focused message via HEREDOC; never force-push, never skip hooks, never commit secrets (`.env`, tokens, keys).
