@@ -112,34 +112,62 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             data = json.loads(self.rfile.read(length))
-            address = str(data["address"])
-            port = int(data.get("port") or MATTER_UDP_PORT)
-            packet_hex = str(data["packet"])
-            packet = bytes.fromhex(packet_hex)
-        except (KeyError, ValueError, json.JSONDecodeError) as err:
-            self._json(400, {"ok": False, "error": f"invalid json: {err}"})
+            handle_command(data)
+        except (KeyError, ValueError, json.JSONDecodeError, OSError) as err:
+            status = 500 if isinstance(err, OSError) else 400
+            self._json(status, {"ok": False, "error": str(err)})
             return
-        if not packet or len(packet) > MAX_PACKET:
-            self._json(400, {"ok": False, "error": "packet too large or empty"})
-            return
-        try:
-            send_multicast(address, port, packet)
-        except OSError as err:
-            self._json(500, {"ok": False, "error": str(err)})
-            return
-        self._json(
-            200,
-            {
-                "ok": True,
-                "bytes": len(packet),
-                "address": address,
-                "port": port,
-            },
-        )
+        self._json(200, {"ok": True, "address": data.get("address"), "port": data.get("port")})
+
+
+def handle_command(data: dict) -> None:
+    address = str(data["address"])
+    port = int(data.get("port") or MATTER_UDP_PORT)
+    packet = bytes.fromhex(str(data["packet"]))
+    if not packet or len(packet) > MAX_PACKET:
+        raise ValueError("packet too large or empty")
+    send_multicast(address, port, packet)
+
+
+def _stdin_loop() -> None:
+    import sys
+    import time
+
+    print("matter-groupcast: reading Supervisor stdin", flush=True)
+    buf = ""
+    while True:
+        chunk = sys.stdin.read(1)
+        if chunk == "":
+            time.sleep(0.25)
+            continue
+        buf += chunk
+        if chunk != "\n" and len(buf) < 16_384:
+            try:
+                data = json.loads(buf)
+            except json.JSONDecodeError:
+                continue
+            buf = ""
+            try:
+                handle_command(data)
+            except Exception as err:  # noqa: BLE001
+                print(f"matter-groupcast: stdin command failed: {err}", flush=True)
+            continue
+        if chunk == "\n":
+            line = buf.strip()
+            buf = ""
+            if not line:
+                continue
+            try:
+                handle_command(json.loads(line))
+            except Exception as err:  # noqa: BLE001
+                print(f"matter-groupcast: stdin command failed: {err}", flush=True)
 
 
 def main() -> None:
+    import threading
+
     ifindex, src = _backbone_iface()
+    threading.Thread(target=_stdin_loop, name="stdin", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
     print(
         f"matter-groupcast: listening on 0.0.0.0:{LISTEN_PORT} "

@@ -10,8 +10,9 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 
 from .sender_urls import (
-    ADDON_PORT,
     ADDON_SLUG_SUFFIX,
+    GITHUB_REPO_SLUG,
+    SUPERVISOR_SENDER,
     addon_hosts_from_info,
     build_sender_urls,
     hyphenate_slug,
@@ -27,11 +28,28 @@ def candidate_sender_urls(hass: HomeAssistant, configured: str | None = None) ->
     extra: list[str] = []
     extra.extend(_supervisor_addon_hosts(hass))
     extra.extend(_supervisor_lan_hosts(hass))
+    http_configured = None if configured and configured.startswith("supervisor:") else configured
     return build_sender_urls(
-        configured=configured,
+        configured=http_configured,
         extra_hosts=extra,
         hass_host=_hass_host(hass),
     )
+
+
+def sender_addon_slug(hass: HomeAssistant) -> str | None:
+    try:
+        from homeassistant.components.hassio import get_addons_info
+    except ImportError:
+        return GITHUB_REPO_SLUG if hassio_prefers_addon(hass) else None
+    try:
+        addons = get_addons_info(hass)
+    except Exception:  # noqa: BLE001
+        addons = None
+    if isinstance(addons, dict):
+        for slug in addons:
+            if ADDON_SLUG_SUFFIX in str(slug):
+                return str(slug)
+    return GITHUB_REPO_SLUG if hassio_prefers_addon(hass) else None
 
 
 def _supervisor_addon_hosts(hass: HomeAssistant) -> list[str]:
@@ -81,7 +99,21 @@ def _hass_host(hass: HomeAssistant) -> str | None:
     return None
 
 
+def _stdin_service(hass: HomeAssistant) -> tuple[str, str] | None:
+    if hass.services.has_service("hassio", "app_stdin"):
+        return "app_stdin", "app"
+    if hass.services.has_service("hassio", "addon_stdin"):
+        return "addon_stdin", "addon"
+    return None
+
+
 async def async_find_sender(hass: HomeAssistant, configured: str | None = None) -> str | None:
+    # Home Assistant Core is firewalled off host-network add-on ports. Supervisor
+    # stdin can still reach the sender.
+    if hassio_prefers_addon(hass) and _stdin_service(hass) and sender_addon_slug(hass):
+        _LOGGER.info("Using Supervisor stdin for Matter Groupcast sender")
+        return SUPERVISOR_SENDER
+
     urls = candidate_sender_urls(hass, configured)
     async with aiohttp.ClientSession(timeout=SEND_TIMEOUT) as session:
         for url in urls:
@@ -110,18 +142,35 @@ async def async_inject_multicast(
     port: int,
     packet: bytes,
 ) -> None:
-    del hass  # API keeps hass for call-site compatibility with other HA clients.
+    payload = {"address": address, "port": port, "packet": packet.hex()}
+    if sender_url == SUPERVISOR_SENDER:
+        await _async_inject_stdin(hass, payload)
+        return
     async with aiohttp.ClientSession(timeout=SEND_TIMEOUT) as session:
         async with session.post(
             f"{sender_url.rstrip('/')}/multicast",
-            json={"address": address, "port": port, "packet": packet.hex()},
+            json=payload,
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"Groupcast add-on returned HTTP {resp.status}: {text[:200]}")
-            payload: dict[str, Any] = await resp.json(content_type=None)
-            if not payload.get("ok"):
-                raise RuntimeError(payload.get("error") or "Groupcast add-on send failed")
+            body: dict[str, Any] = await resp.json(content_type=None)
+            if not body.get("ok"):
+                raise RuntimeError(body.get("error") or "Groupcast add-on send failed")
+
+
+async def _async_inject_stdin(hass: HomeAssistant, payload: dict[str, Any]) -> None:
+    service = _stdin_service(hass)
+    slug = sender_addon_slug(hass)
+    if not service or not slug:
+        raise RuntimeError("Supervisor stdin is not available for the Groupcast sender")
+    service_name, slug_key = service
+    await hass.services.async_call(
+        "hassio",
+        service_name,
+        {slug_key: slug, "input": payload},
+        blocking=True,
+    )
 
 
 def hassio_prefers_addon(hass: HomeAssistant) -> bool:

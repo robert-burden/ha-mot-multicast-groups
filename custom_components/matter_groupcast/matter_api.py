@@ -44,6 +44,7 @@ from .group_send import (
     send_udp_multicast,
 )
 from .sender_client import async_find_sender, async_inject_multicast, hassio_prefers_addon
+from .sender_urls import SUPERVISOR_SENDER
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -309,7 +310,9 @@ class MatterGroupController:
                         encoded.port,
                         encoded.packet,
                     )
-                    self.last_send_path = "groupcast_addon"
+                    self.last_send_path = (
+                        "groupcast_supervisor" if sender_url == SUPERVISOR_SENDER else "groupcast_addon"
+                    )
                 else:
                     await self.hass.async_add_executor_job(
                         send_udp_multicast,
@@ -334,7 +337,7 @@ class MatterGroupController:
         last_counter = encoded_packets[-1][1].message_counter
         data = dict(self.entry.data)
         data[CONF_MSG_COUNTER] = last_counter
-        if sender_url:
+        if sender_url and not sender_url.startswith("supervisor:"):
             data[CONF_SENDER_URL] = sender_url
         self.hass.config_entries.async_update_entry(self.entry, data=data)
         return True

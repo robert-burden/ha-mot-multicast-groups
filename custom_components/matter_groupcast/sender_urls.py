@@ -8,6 +8,7 @@ ADDON_PORT = 5599
 ADDON_SLUG_SUFFIX = "matter_groupcast_sender"
 # Supervisor slug prefix for https://github.com/robert-burden/ha-mot-multicast-groups
 GITHUB_REPO_SLUG = "1c2d22dc_matter_groupcast_sender"
+SUPERVISOR_SENDER = "supervisor://stdin"
 
 
 def hyphenate_slug(slug: str) -> str:
