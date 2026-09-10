@@ -37,6 +37,7 @@ from .group_send import (
     EncodedGroupMessage,
     GroupSendParams,
     encode_group_invoke,
+    epoch_key_bytes,
     invoke_onoff,
     invokes_for_turn_on,
     next_message_counter,
@@ -83,11 +84,8 @@ def _parse_node_endpoint(unique_id: str | None) -> tuple[int | None, int | None]
 
 
 def _epoch_keys(key_hex: str) -> tuple[str, str, str]:
-    k0 = bytes.fromhex(key_hex)
-    k1 = k0[:-1] + bytes([k0[-1] ^ 0x01])
-    k2 = k0[:-1] + bytes([k0[-1] ^ 0x02])
     encode = lambda key: base64.b64encode(key).decode("ascii")
-    return encode(k0), encode(k1), encode(k2)
+    return tuple(encode(key) for key in epoch_key_bytes(key_hex))
 
 
 def _extract_acl(raw: Any) -> list[dict[str, Any]]:
@@ -282,22 +280,23 @@ class MatterGroupController:
 
         counter = next_message_counter(self.entry.data.get(CONF_MSG_COUNTER))
         encoded_packets: list[tuple[ClusterInvoke, EncodedGroupMessage]] = []
-        epoch_key = bytes.fromhex(key_hex)
         for invoke in invokes:
-            encoded = encode_group_invoke(
-                GroupSendParams(
-                    fabric_id=fabric["fabric_id"],
-                    compressed_fabric_id=fabric["compressed_fabric_id"],
-                    source_node_id=fabric["source_node_id"],
-                    group_id=self.group_id,
-                    epoch_key=epoch_key,
-                    endpoint_id=1,
-                    message_counter=counter,
-                ),
-                invoke,
-            )
-            encoded_packets.append((invoke, encoded))
-            counter = next_message_counter(encoded.message_counter)
+            # Same counter for every epoch key: only the matching key decrypts.
+            for epoch_key in epoch_key_bytes(key_hex):
+                encoded = encode_group_invoke(
+                    GroupSendParams(
+                        fabric_id=fabric["fabric_id"],
+                        compressed_fabric_id=fabric["compressed_fabric_id"],
+                        source_node_id=fabric["source_node_id"],
+                        group_id=self.group_id,
+                        epoch_key=epoch_key,
+                        endpoint_id=1,
+                        message_counter=counter,
+                    ),
+                    invoke,
+                )
+                encoded_packets.append((invoke, encoded))
+            counter = next_message_counter(counter)
 
         try:
             for invoke, encoded in encoded_packets:

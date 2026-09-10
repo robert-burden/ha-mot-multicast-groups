@@ -26,6 +26,7 @@ derive_group_session_id = _module.derive_group_session_id
 derive_operational_key = _module.derive_operational_key
 encode_group_invoke = _module.encode_group_invoke
 encode_group_onoff = _module.encode_group_onoff
+epoch_key_bytes = _module.epoch_key_bytes
 invoke_onoff = _module.invoke_onoff
 invokes_for_turn_on = _module.invokes_for_turn_on
 multicast_address_for = _module.multicast_address_for
@@ -40,6 +41,7 @@ __all__ = [
     "derive_operational_key",
     "encode_group_invoke",
     "encode_group_onoff",
+    "epoch_key_bytes",
     "invoke_onoff",
     "invokes_for_turn_on",
     "multicast_address_for",

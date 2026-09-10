@@ -142,3 +142,11 @@ def test_sender_urls_prefer_supervisor_hostname() -> None:
     assert urls.index("http://1c2d22dc-matter-groupcast-sender:5599") < urls.index(
         "http://homeassistant.local:5599"
     )
+
+
+def test_epoch_keys_are_last_byte_variants() -> None:
+    k0, k1, k2 = gs.epoch_key_bytes("00112233445566778899aabbccddeeff")
+    assert k0.hex() == "00112233445566778899aabbccddeeff"
+    assert k1.hex() == "00112233445566778899aabbccddeefe"
+    assert k2.hex() == "00112233445566778899aabbccddeefd"
+    assert len({k0, k1, k2}) == 3

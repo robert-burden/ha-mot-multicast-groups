@@ -93,6 +93,21 @@ class EncodedGroupMessage:
     operational_key: bytes
 
 
+def epoch_key_bytes(key_hex: str) -> tuple[bytes, bytes, bytes]:
+    """The three epoch keys written at provision time.
+
+    Epoch 1/2 are the epoch-0 key with the last byte XORed. Devices without a
+    trusted clock use the second-newest start time (epoch 1); devices with time
+    use the latest start time that is not in the future (epoch 2). Send all three.
+    """
+    k0 = bytes.fromhex(key_hex)
+    if len(k0) != 16:
+        raise ValueError("Matter epoch key must be 16 bytes")
+    k1 = k0[:-1] + bytes([k0[-1] ^ 0x01])
+    k2 = k0[:-1] + bytes([k0[-1] ^ 0x02])
+    return k0, k1, k2
+
+
 def derive_operational_key(epoch_key: bytes, compressed_fabric_id: int) -> bytes:
     if len(epoch_key) != 16:
         raise ValueError("Matter epoch key must be 16 bytes")

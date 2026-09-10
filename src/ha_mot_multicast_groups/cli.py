@@ -13,6 +13,7 @@ from ha_mot_multicast_groups.matter_client import MatterClient, MatterError
 from ha_mot_multicast_groups.group_send import (
     GroupSendParams,
     encode_group_invoke,
+    epoch_key_bytes,
     invoke_onoff,
     invokes_for_turn_on,
     next_message_counter,
@@ -173,27 +174,28 @@ async def cmd_group(args: argparse.Namespace) -> int:
             counter = next_message_counter(previous)
             last = None
             for invoke in invokes:
-                encoded = encode_group_invoke(
-                    GroupSendParams(
-                        fabric_id=int(fabric_id),
-                        compressed_fabric_id=int(compressed),
-                        source_node_id=int(node_id),
-                        group_id=settings.group_id,
-                        epoch_key=bytes.fromhex(settings.group_key_hex),
-                        endpoint_id=1,
-                        message_counter=counter,
-                    ),
-                    invoke,
-                )
-                send_udp_multicast(encoded.packet, encoded.multicast_address, encoded.port)
-                print(
-                    f"group {hex(settings.group_id)} {invoke.command_name} -> "
-                    f"[{encoded.multicast_address}]:{encoded.port} "
-                    f"session={hex(encoded.session_id)} counter={encoded.message_counter} "
-                    f"bytes={len(encoded.packet)}"
-                )
-                last = encoded
-                counter = next_message_counter(encoded.message_counter)
+                for epoch_key in epoch_key_bytes(settings.group_key_hex):
+                    encoded = encode_group_invoke(
+                        GroupSendParams(
+                            fabric_id=int(fabric_id),
+                            compressed_fabric_id=int(compressed),
+                            source_node_id=int(node_id),
+                            group_id=settings.group_id,
+                            epoch_key=epoch_key,
+                            endpoint_id=1,
+                            message_counter=counter,
+                        ),
+                        invoke,
+                    )
+                    send_udp_multicast(encoded.packet, encoded.multicast_address, encoded.port)
+                    print(
+                        f"group {hex(settings.group_id)} {invoke.command_name} -> "
+                        f"[{encoded.multicast_address}]:{encoded.port} "
+                        f"session={hex(encoded.session_id)} counter={encoded.message_counter} "
+                        f"bytes={len(encoded.packet)}"
+                    )
+                    last = encoded
+                counter = next_message_counter(counter)
             if last is not None:
                 counter_path.write_text(str(last.message_counter) + "\n")
             return 0
