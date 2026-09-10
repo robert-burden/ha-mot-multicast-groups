@@ -85,7 +85,7 @@ async def provision_node(
         light.endpoint_id,
         CLUSTER_GROUPS,
         "addGroup",
-        {"groupID": settings.group_id, "groupName": settings.group_name},
+        {"groupID": settings.group_id, "groupName": settings.group_name[:16]},
     )
 
     acl_source = existing_acl

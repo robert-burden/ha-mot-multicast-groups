@@ -242,23 +242,23 @@ class MatterGroupController:
     async def async_apply(self, invokes: list[ClusterInvoke]) -> None:
         if await self._async_try_plugin_groupcast(invokes):
             return
-        # Dozens of Thread unicasts can block the UI for a minute each when
-        # sessions are dead. Cap the wait so a missed add-on does not look like
-        # a frozen toggle.
-        timeout = 8 if hassio_prefers_addon(self.hass) else 60
-        self.last_send_path = "concurrent_unicast"
-        try:
-            await asyncio.wait_for(self._async_unicast_invokes(invokes), timeout=timeout)
-        except TimeoutError:
-            _LOGGER.warning(
-                "Unicast fallback timed out after %ss; lights may not have changed",
-                timeout,
+        if hassio_prefers_addon(self.hass):
+            if self.last_send_path == "needs_provision":
+                raise HomeAssistantError(
+                    "Run Developer Tools → Actions → matter_groupcast.provision once. "
+                    "This entity will not unicast Thread bulbs (that is popcorn)."
+                )
+            raise HomeAssistantError(
+                "Matter group multicast did not send. Not falling back to unicast."
             )
+        self.last_send_path = "concurrent_unicast"
+        await self._async_unicast_invokes(invokes)
 
     async def _async_try_plugin_groupcast(self, invokes: list[ClusterInvoke]) -> bool:
         key_hex = self.entry.data.get(CONF_GROUP_KEY_HEX)
         if not key_hex:
-            _LOGGER.info(
+            self.last_send_path = "needs_provision"
+            _LOGGER.warning(
                 "No Matter group key stored yet; run matter_groupcast.provision, "
                 "then light commands will use IPv6 group multicast"
             )
@@ -266,15 +266,16 @@ class MatterGroupController:
 
         fabric = self._fabric_params()
         if fabric is None:
+            self.last_send_path = "no_fabric"
             _LOGGER.warning("Matter Server fabric info is missing; cannot groupcast")
             return False
 
         sender_url = await self._async_sender_url()
         if not sender_url and hassio_prefers_addon(self.hass):
+            self.last_send_path = "addon_unreachable"
             _LOGGER.warning(
                 "Matter Groupcast add-on is not reachable. Install it from this "
-                "GitHub repo (host network) so multicast can reach Thread. "
-                "Falling back to concurrent unicast."
+                "GitHub repo (host network) so multicast can reach Thread."
             )
             return False
 
@@ -326,7 +327,8 @@ class MatterGroupController:
                     self.last_send_path,
                 )
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Plugin groupcast send failed (%s); falling back to unicast", err)
+            self.last_send_path = "groupcast_failed"
+            _LOGGER.warning("Plugin groupcast send failed (%s)", err)
             return False
 
         last_counter = encoded_packets[-1][1].message_counter
@@ -455,7 +457,7 @@ class MatterGroupController:
             endpoint_id=member.endpoint_id,
             cluster_id=CLUSTER_GROUPS,
             command_name="addGroup",
-            payload={"groupID": self.group_id, "groupName": self.group_name},
+            payload={"groupID": self.group_id, "groupName": self.group_name[:16]},
         )
         raw = await client.send_command(
             "read_attribute",

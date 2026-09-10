@@ -18,7 +18,7 @@ from .const import (
 STEP_USER = vol.Schema(
     {
         vol.Required(CONF_SOURCE_ENTITY): EntitySelector(EntitySelectorConfig(domain="light")),
-        vol.Optional(CONF_GROUP_NAME, default=DEFAULT_GROUP_NAME): str,
+        vol.Optional(CONF_GROUP_NAME, default=DEFAULT_GROUP_NAME): vol.All(str, vol.Length(max=16)),
         vol.Optional(CONF_GROUP_ID, default=DEFAULT_GROUP_ID): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=0xFEFF)
         ),
