@@ -9,17 +9,14 @@ from tests.conftest import sender as sender_mod
 from tests.conftest import sender_urls as su
 
 
-def test_multicast_address_matches_chip_layout() -> None:
+def test_groupcast_addresses_include_thread_and_iana() -> None:
+    addrs = gs.groupcast_addresses(2, 0x0D01)
     packed = __import__("socket").inet_pton
-    addr = gs.multicast_address_for(2, 0x0D01)
-    assert packed(__import__("socket").AF_INET6, addr) == bytes.fromhex(
-        "ff350040fd0000000000000002000d01"
-    )
-    # Fabric 0x7D, group 0x07D0: low 8 fabric bits sit in the 32-bit group field.
-    addr_7d = gs.multicast_address_for(0x7D, 0x07D0)
-    assert packed(__import__("socket").AF_INET6, addr_7d) == bytes.fromhex(
-        "ff350040fd000000000000007d0007d0"
-    )
+    af = __import__("socket").AF_INET6
+    assert packed(af, addrs[0]) == bytes.fromhex("ff350040fd0000000000000002000d01")
+    assert packed(af, addrs[1]) == bytes.fromhex("ff330040fd0000000000000002000d01")
+    assert "ff05::fa" in addrs
+    assert "ff03::fa" in addrs
 
 
 def test_sender_skips_docker_and_keeps_thread() -> None:
@@ -32,7 +29,13 @@ def test_sender_skips_docker_and_keeps_thread() -> None:
     assert not sender_mod.iface_allowed("veth1a2b3c")
 
 
-def test_operational_key_is_16_bytes_and_key_dependent() -> None:
+def test_spec_operational_key_and_session_id() -> None:
+    epoch = bytes.fromhex("235bf7e62823d358dca4ba50b1535f4b")
+    op = gs.derive_operational_key(epoch, 0x87E1B004E235A130)
+    assert op.hex() == "a6f5306baf6d050af23ba4bd6b9dd960"
+    zero = gs.derive_operational_key(bytes(16), 0x87E1B004E235A130)
+    assert zero.hex() == "c5f2690187115150c356ad93b385bb0f"
+    assert gs.derive_group_session_id(zero) == 0x479E
     epoch = bytes.fromhex("00112233445566778899aabbccddeeff")
     a = gs.derive_operational_key(epoch, 0x1122334455667788)
     b = gs.derive_operational_key(epoch, 0x1122334455667789)

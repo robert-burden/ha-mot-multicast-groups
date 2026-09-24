@@ -38,6 +38,7 @@ from .group_send import (
     GroupSendParams,
     encode_group_invoke,
     epoch_key_bytes,
+    groupcast_addresses,
     invoke_onoff,
     invokes_for_turn_on,
     next_message_counter,
@@ -300,31 +301,33 @@ class MatterGroupController:
                 encoded_packets.append((invoke, encoded))
             counter = next_message_counter(counter)
 
+        destinations = groupcast_addresses(fabric["fabric_id"], self.group_id)
         try:
             for invoke, encoded in encoded_packets:
-                if sender_url:
-                    await async_inject_multicast(
-                        self.hass,
-                        sender_url,
-                        encoded.multicast_address,
-                        encoded.port,
-                        encoded.packet,
-                    )
-                    self.last_send_path = (
-                        "groupcast_supervisor" if sender_url == SUPERVISOR_SENDER else "groupcast_addon"
-                    )
-                else:
-                    await self.hass.async_add_executor_job(
-                        send_udp_multicast,
-                        encoded.packet,
-                        encoded.multicast_address,
-                        encoded.port,
-                    )
-                    self.last_send_path = "groupcast_local"
+                for address in destinations:
+                    if sender_url:
+                        await async_inject_multicast(
+                            self.hass,
+                            sender_url,
+                            address,
+                            encoded.port,
+                            encoded.packet,
+                        )
+                        self.last_send_path = (
+                            "groupcast_supervisor" if sender_url == SUPERVISOR_SENDER else "groupcast_addon"
+                        )
+                    else:
+                        await self.hass.async_add_executor_job(
+                            send_udp_multicast,
+                            encoded.packet,
+                            address,
+                            encoded.port,
+                        )
+                        self.last_send_path = "groupcast_local"
                 _LOGGER.info(
                     "Sent Matter groupcast %s to %s session=%s counter=%s via %s",
                     invoke.command_name,
-                    encoded.multicast_address,
+                    ",".join(destinations),
                     encoded.session_id,
                     encoded.message_counter,
                     self.last_send_path,

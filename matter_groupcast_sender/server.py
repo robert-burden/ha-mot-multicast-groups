@@ -94,6 +94,16 @@ def _send_one(address: str, port: int, packet: bytes, ifindex: int, src: str | N
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, ifindex)
         if src:
             sock.bind((src, 0, 0, ifindex))
+        if ifindex:
+            try:
+                group = socket.inet_pton(socket.AF_INET6, address)
+                sock.setsockopt(
+                    socket.IPPROTO_IPV6,
+                    socket.IPV6_JOIN_GROUP,
+                    group + ifindex.to_bytes(4, "little"),
+                )
+            except OSError as err:
+                print(f"matter-groupcast: join {address} on {name} failed: {err}", flush=True)
         sock.sendto(packet, (address, port, 0, ifindex))
         print(
             f"matter-groupcast: sent {len(packet)} bytes to [{address}]:{port} "

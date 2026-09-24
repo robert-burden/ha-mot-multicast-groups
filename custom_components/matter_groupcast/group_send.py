@@ -130,15 +130,29 @@ def derive_group_session_id(operational_key: bytes) -> int:
     return int.from_bytes(hashed, "big")
 
 
-def multicast_address_for(fabric_id: int, group_id: int) -> str:
-    """CHIP BuildMatterPerGroupMulticastAddress: FF35:0040:FD + FabricId + 00 + GroupId."""
+def multicast_address_for(fabric_id: int, group_id: int, scope: int = 5) -> str:
+    """CHIP BuildMatterPerGroupMulticastAddress: FF3{scope}:0040:FD + FabricId + 00 + GroupId."""
     packed = (
-        b"\xff\x35\x00\x40\xfd"
+        bytes((0xFF, 0x30 | (scope & 0x0F), 0x00, 0x40, 0xFD))
         + int(fabric_id).to_bytes(8, "big")
         + b"\x00"
         + int(group_id & 0xFFFF).to_bytes(2, "big")
     )
     return socket.inet_ntop(socket.AF_INET6, packed)
+
+
+def groupcast_addresses(fabric_id: int, group_id: int) -> tuple[str, ...]:
+    """Destinations CHIP and Thread stacks actually subscribe to.
+
+    Per-group is site-local (ff35). Thread only forwards that after MLR, so
+    also send the realm-local twin (ff33) and IANA Matter (ff0s::fa).
+    """
+    return (
+        multicast_address_for(fabric_id, group_id, 5),
+        multicast_address_for(fabric_id, group_id, 3),
+        "ff05::fa",
+        "ff03::fa",
+    )
 
 
 def _tlv_ctx_uint(tag: int, value: int, width: int | None = None) -> bytes:
