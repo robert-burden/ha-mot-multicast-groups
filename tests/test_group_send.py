@@ -29,6 +29,11 @@ def test_sender_skips_docker_and_keeps_thread() -> None:
     assert not sender_mod.iface_allowed("veth1a2b3c")
 
 
+def test_sender_unicast_skips_thread_iface() -> None:
+    assert sender_mod.is_multicast_address("ff35:40:fd00::200:d01")
+    assert not sender_mod.is_multicast_address("fd21:2ca2:6bf2:0:8724:5352:b685:5a24")
+
+
 def test_spec_operational_key_and_session_id() -> None:
     epoch = bytes.fromhex("235bf7e62823d358dca4ba50b1535f4b")
     op = gs.derive_operational_key(epoch, 0x87E1B004E235A130)
@@ -57,8 +62,34 @@ def test_onoff_invoke_tlv_contains_cluster_and_command() -> None:
     assert payload[-1] == 0x18
     assert bytes((0x24, 0x01, gs.CLUSTER_ONOFF)) in payload
     assert bytes((0x24, 0x02, 0x01)) in payload  # On
+    assert bytes((0x24, 0xFF, gs.IM_REVISION)) in payload
     off = gs.encode_onoff_invoke("off", endpoint_id=1)
     assert bytes((0x24, 0x02, 0x00)) in off
+
+
+def test_privacy_group_message_sets_p_flag() -> None:
+    params = gs.GroupSendParams(
+        fabric_id=2,
+        compressed_fabric_id=0xAABBCCDDEEFF0011,
+        source_node_id=112233,
+        group_id=0x0D01,
+        epoch_key=bytes.fromhex("0123456789abcdeffedcba9876543210"),
+        command="off",
+        message_counter=0x01020304,
+        exchange_id=0x1111,
+        privacy=True,
+    )
+    encoded = gs.encode_group_onoff(params)
+    flags, session_id, security_flags = struct.unpack_from("<BHB", encoded.packet, 0)
+    assert flags == 0x06
+    assert security_flags == gs.SESSION_TYPE_GROUP | gs.SECURITY_FLAG_PRIVACY
+    assert session_id == encoded.session_id
+    # Privacy obfuscates the counter/ids; the cleartext header no longer matches.
+    clear = gs.encode_packet_header(
+        encoded.session_id, 0x01020304, 112233, 0x0D01, privacy=True
+    )
+    assert encoded.packet[:4] == clear[:4]
+    assert encoded.packet[4:18] != clear[4:]
 
 
 def test_encoded_group_message_roundtrip_decrypt() -> None:
@@ -84,7 +115,10 @@ def test_encoded_group_message_roundtrip_decrypt() -> None:
     nonce = gs.generate_nonce(security_flags, params.message_counter, params.source_node_id)
     plaintext = AESCCM(encoded.operational_key, tag_length=16).decrypt(nonce, ciphertext, header)
     assert plaintext[1] == 0x08  # InvokeCommandRequest
-    assert gs.encode_onoff_invoke("off", 1) in plaintext
+    # Group paths omit endpoint; IM revision is context tag 0xFF, not 3.
+    assert gs.encode_onoff_invoke("off", None) in plaintext
+    assert bytes((0x24, 0xFF, gs.IM_REVISION)) in plaintext
+    assert bytes((0x24, 0x03, gs.IM_REVISION)) not in plaintext
 
 
 def test_brightness_and_color_conversions() -> None:
@@ -145,7 +179,7 @@ def test_color_temp_group_message_roundtrip_decrypt() -> None:
     ciphertext = encoded.packet[header_len:]
     nonce = gs.generate_nonce(header[3], params.message_counter, params.source_node_id)
     plaintext = AESCCM(encoded.operational_key, tag_length=16).decrypt(nonce, ciphertext, header)
-    assert gs.encode_invoke(invoke.cluster_id, invoke.command_id, invoke.fields, 1) in plaintext
+    assert gs.encode_invoke(invoke.cluster_id, invoke.command_id, invoke.fields, None) in plaintext
 
 
 def test_sender_urls_prefer_supervisor_hostname() -> None:

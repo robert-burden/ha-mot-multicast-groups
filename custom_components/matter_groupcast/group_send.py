@@ -34,9 +34,11 @@ CMD_MOVE_TO_COLOR = 0x07
 CMD_MOVE_TO_COLOR_TEMPERATURE = 0x0A
 
 SESSION_TYPE_GROUP = 0x01
+SECURITY_FLAG_PRIVACY = 0x80
 PACKET_FLAG_DEST_GROUP = 0x02
 PACKET_FLAG_SOURCE_NODE = 0x04
 EXCHANGE_FLAG_INITIATOR = 0x01
+PRIVACY_KEY_INFO = b"PrivacyKey"
 
 GROUP_KEY_INFO = b"GroupKey v1.0"
 GROUP_KEY_HASH_INFO = b"GroupKeyHash"
@@ -81,6 +83,7 @@ class GroupSendParams:
     endpoint_id: int = 1
     message_counter: int | None = None
     exchange_id: int | None = None
+    privacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,25 @@ def derive_operational_key(epoch_key: bytes, compressed_fabric_id: int) -> bytes
         salt=salt,
         info=GROUP_KEY_INFO,
     ).derive(epoch_key)
+
+
+def derive_privacy_key(operational_key: bytes) -> bytes:
+    """HKDF(operational key, salt=[], info=\"PrivacyKey\", 16)."""
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=16,
+        salt=None,
+        info=PRIVACY_KEY_INFO,
+    ).derive(operational_key)
+
+
+def apply_privacy(header: bytes, ciphertext: bytes, operational_key: bytes, session_id: int) -> bytes:
+    """Obfuscate message counter + node/group IDs (header[4:]) with AES-CCM keystream."""
+    mic = ciphertext[-16:]
+    nonce = struct.pack(">H", session_id & 0xFFFF) + mic[5:]
+    privacy_key = derive_privacy_key(operational_key)
+    obfuscated = AESCCM(privacy_key, tag_length=16).encrypt(nonce, header[4:], b"")[: len(header) - 4]
+    return header[:4] + obfuscated
 
 
 def derive_group_session_id(operational_key: bytes) -> int:
@@ -207,7 +229,10 @@ def encode_invoke(
             TLV_CTX_BOOL_FALSE,
             0x01,  # timedRequest
             *invoke_requests,
-            *_tlv_ctx_uint(0x03, IM_REVISION),
+            # InteractionModelRevision is context tag 0xFF on every IM message.
+            # Tag 3 is DelayReportData; putting the revision there makes IKEA
+            # (and current CHIP) reject the Invoke.
+            *_tlv_ctx_uint(0xFF, IM_REVISION),
             TLV_END,
         )
     )
@@ -384,9 +409,11 @@ def encode_packet_header(
     message_counter: int,
     source_node_id: int,
     dest_group_id: int,
+    *,
+    privacy: bool = False,
 ) -> bytes:
     flags = PACKET_FLAG_DEST_GROUP | PACKET_FLAG_SOURCE_NODE
-    security_flags = SESSION_TYPE_GROUP
+    security_flags = SESSION_TYPE_GROUP | (SECURITY_FLAG_PRIVACY if privacy else 0)
     return (
         struct.pack("<BHB", flags, session_id & 0xFFFF, security_flags)
         + struct.pack("<I", message_counter & 0xFFFFFFFF)
@@ -423,13 +450,20 @@ def encode_group_invoke(params: GroupSendParams, invoke: ClusterInvoke) -> Encod
     )
     exchange_id = params.exchange_id if params.exchange_id is not None else (message_counter ^ session_id) & 0xFFFF
     header = encode_packet_header(
-        session_id, message_counter, params.source_node_id, params.group_id
+        session_id,
+        message_counter,
+        params.source_node_id,
+        params.group_id,
+        privacy=params.privacy,
     )
+    # Group Invoke paths omit endpoint; GroupTable maps the dest group to endpoints.
     plaintext = encode_payload_header(exchange_id) + encode_invoke(
-        invoke.cluster_id, invoke.command_id, invoke.fields, params.endpoint_id
+        invoke.cluster_id, invoke.command_id, invoke.fields, endpoint_id=None
     )
     nonce = generate_nonce(header[3], message_counter, params.source_node_id)
     ciphertext = AESCCM(operational_key, tag_length=16).encrypt(nonce, plaintext, header)
+    if params.privacy:
+        header = apply_privacy(header, ciphertext, operational_key, session_id)
     return EncodedGroupMessage(
         packet=header + ciphertext,
         multicast_address=multicast_address_for(params.fabric_id, params.group_id),

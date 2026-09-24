@@ -85,16 +85,26 @@ def _multicast_ifaces() -> list[tuple[int, str | None, str]]:
     return targets
 
 
-def _send_one(address: str, port: int, packet: bytes, ifindex: int, src: str | None, name: str) -> None:
+def is_multicast_address(address: str) -> bool:
+    try:
+        return IPv6Address(address).is_multicast
+    except ValueError:
+        return True
+
+
+def _send_one(address: str, port: int, packet: bytes, ifindex: int, src: str | None, name: str, *, multicast: bool) -> None:
     sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     try:
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 64)
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
-        if ifindex:
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, ifindex)
+        if multicast:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 64)
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
+            if ifindex:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, ifindex)
+        else:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, 64)
         if src:
             sock.bind((src, 0, 0, ifindex))
-        if ifindex:
+        if multicast and ifindex:
             try:
                 group = socket.inet_pton(socket.AF_INET6, address)
                 sock.setsockopt(
@@ -104,7 +114,8 @@ def _send_one(address: str, port: int, packet: bytes, ifindex: int, src: str | N
                 )
             except OSError as err:
                 print(f"matter-groupcast: join {address} on {name} failed: {err}", flush=True)
-        sock.sendto(packet, (address, port, 0, ifindex))
+        scope_id = ifindex if multicast else 0
+        sock.sendto(packet, (address, port, 0, scope_id))
         print(
             f"matter-groupcast: sent {len(packet)} bytes to [{address}]:{port} "
             f"iface={name} ifindex={ifindex} src={src}",
@@ -115,14 +126,19 @@ def _send_one(address: str, port: int, packet: bytes, ifindex: int, src: str | N
 
 
 def send_multicast(address: str, port: int, packet: bytes) -> None:
+    multicast = is_multicast_address(address)
     targets = _multicast_ifaces()
+    if not multicast:
+        # Unicast overlay must use the LAN path (Google BBR). Injecting on
+        # wpan0 hits ChannelAccessFailure and never reaches the bulbs.
+        targets = [(idx, src, name) for idx, src, name in targets if not is_thread_iface(name)] or targets
     if not targets:
         raise OSError("no IPv6 multicast interface")
     errors: list[str] = []
     sent = 0
     for ifindex, src, name in targets:
         try:
-            _send_one(address, port, packet, ifindex, src, name)
+            _send_one(address, port, packet, ifindex, src, name, multicast=multicast)
             sent += 1
         except OSError as err:
             errors.append(f"{name}: {err}")
@@ -180,12 +196,25 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def handle_command(data: dict) -> None:
-    address = str(data["address"])
     port = int(data.get("port") or MATTER_UDP_PORT)
     packet = bytes.fromhex(str(data["packet"]))
     if not packet or len(packet) > MAX_PACKET:
         raise ValueError("packet too large or empty")
-    send_multicast(address, port, packet)
+    addresses = data.get("addresses") or [data["address"]]
+    if not isinstance(addresses, list) or not addresses:
+        raise ValueError("address or addresses required")
+    errors: list[str] = []
+    sent = 0
+    for raw in addresses:
+        address = str(raw)
+        try:
+            send_multicast(address, port, packet)
+            sent += 1
+        except OSError as err:
+            errors.append(f"{address}: {err}")
+            print(f"matter-groupcast: send failed to {address}: {err}", flush=True)
+    if sent == 0:
+        raise OSError("; ".join(errors) or "send failed")
 
 
 def _stdin_loop() -> None:

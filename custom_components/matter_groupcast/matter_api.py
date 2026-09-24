@@ -156,6 +156,7 @@ class MatterGroupController:
         self.entry = entry
         self.last_send_path: str = "unknown"
         self._sender_url: str | None = None
+        self._overlay_addresses: list[str] | None = None
 
     @property
     def source_entity_id(self) -> str:
@@ -284,50 +285,54 @@ class MatterGroupController:
         counter = next_message_counter(self.entry.data.get(CONF_MSG_COUNTER))
         encoded_packets: list[tuple[ClusterInvoke, EncodedGroupMessage]] = []
         for invoke in invokes:
-            # Same counter for every epoch key: only the matching key decrypts.
+            # Same counter for every epoch key and privacy variant: only the
+            # matching key/header decrypts. Spec wants the P flag; CHIP omits it.
             for epoch_key in epoch_key_bytes(key_hex):
-                encoded = encode_group_invoke(
-                    GroupSendParams(
-                        fabric_id=fabric["fabric_id"],
-                        compressed_fabric_id=fabric["compressed_fabric_id"],
-                        source_node_id=fabric["source_node_id"],
-                        group_id=self.group_id,
-                        epoch_key=epoch_key,
-                        endpoint_id=1,
-                        message_counter=counter,
-                    ),
-                    invoke,
-                )
-                encoded_packets.append((invoke, encoded))
+                for privacy in (False, True):
+                    encoded = encode_group_invoke(
+                        GroupSendParams(
+                            fabric_id=fabric["fabric_id"],
+                            compressed_fabric_id=fabric["compressed_fabric_id"],
+                            source_node_id=fabric["source_node_id"],
+                            group_id=self.group_id,
+                            epoch_key=epoch_key,
+                            endpoint_id=1,
+                            message_counter=counter,
+                            privacy=privacy,
+                        ),
+                        invoke,
+                    )
+                    encoded_packets.append((invoke, encoded))
             counter = next_message_counter(counter)
 
-        destinations = groupcast_addresses(fabric["fabric_id"], self.group_id)
+        destinations = list(groupcast_addresses(fabric["fabric_id"], self.group_id))
+        destinations.extend(await self._async_overlay_addresses())
         try:
             for invoke, encoded in encoded_packets:
-                for address in destinations:
-                    if sender_url:
-                        await async_inject_multicast(
-                            self.hass,
-                            sender_url,
-                            address,
-                            encoded.port,
-                            encoded.packet,
-                        )
-                        self.last_send_path = (
-                            "groupcast_supervisor" if sender_url == SUPERVISOR_SENDER else "groupcast_addon"
-                        )
-                    else:
+                if sender_url:
+                    await async_inject_multicast(
+                        self.hass,
+                        sender_url,
+                        destinations,
+                        encoded.port,
+                        encoded.packet,
+                    )
+                    self.last_send_path = (
+                        "groupcast_supervisor" if sender_url == SUPERVISOR_SENDER else "groupcast_addon"
+                    )
+                else:
+                    for address in destinations:
                         await self.hass.async_add_executor_job(
                             send_udp_multicast,
                             encoded.packet,
                             address,
                             encoded.port,
                         )
-                        self.last_send_path = "groupcast_local"
+                    self.last_send_path = "groupcast_local"
                 _LOGGER.info(
-                    "Sent Matter groupcast %s to %s session=%s counter=%s via %s",
+                    "Sent Matter groupcast %s to %s dests session=%s counter=%s via %s",
                     invoke.command_name,
-                    ",".join(destinations),
+                    len(destinations),
                     encoded.session_id,
                     encoded.message_counter,
                     self.last_send_path,
@@ -380,6 +385,44 @@ class MatterGroupController:
         if self._sender_url:
             _LOGGER.info("Using Matter Groupcast add-on at %s", self._sender_url)
         return self._sender_url
+
+    async def _async_overlay_addresses(self) -> list[str]:
+        """Thread OMR unicasts. Google is the primary BBR, so LAN multicast
+        often never enters the mesh; the same group packet still works if it
+        arrives on the bulb's operational address (port 5540).
+        """
+        if self._overlay_addresses is not None:
+            return self._overlay_addresses
+        client = _get_matter_client(self.hass)
+        members = [member for member in self.async_members() if member.available]
+        addrs: list[str] = []
+
+        async def _one(member: GroupMember) -> list[str]:
+            try:
+                result = await client.send_command("get_node_ip_addresses", node_id=member.node_id)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("No overlay IPs for node %s: %s", member.node_id, err)
+                return []
+            found: list[str] = []
+            values = result if isinstance(result, list) else []
+            for item in values:
+                text = str(item)
+                if ":" in text and not text.lower().startswith("fe80:"):
+                    found.append(text)
+            return found
+
+        results = await asyncio.gather(*[_one(member) for member in members], return_exceptions=True)
+        seen: set[str] = set()
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            for address in result:
+                if address not in seen:
+                    seen.add(address)
+                    addrs.append(address)
+        self._overlay_addresses = addrs
+        _LOGGER.info("Matter groupcast overlay unicast dests: %s", len(addrs))
+        return addrs
 
     async def _async_unicast_invokes(self, invokes: list[ClusterInvoke]) -> None:
         client = _get_matter_client(self.hass)

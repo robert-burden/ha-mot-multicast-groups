@@ -21,7 +21,7 @@ from .sender_urls import (
 
 _LOGGER = logging.getLogger(__name__)
 
-SEND_TIMEOUT = aiohttp.ClientTimeout(total=2.0, sock_connect=0.6)
+SEND_TIMEOUT = aiohttp.ClientTimeout(total=15.0, sock_connect=0.6)
 
 
 def candidate_sender_urls(hass: HomeAssistant, configured: str | None = None) -> list[str]:
@@ -138,11 +138,17 @@ async def async_find_sender(hass: HomeAssistant, configured: str | None = None) 
 async def async_inject_multicast(
     hass: HomeAssistant,
     sender_url: str,
-    address: str,
+    address: str | list[str],
     port: int,
     packet: bytes,
 ) -> None:
-    payload = {"address": address, "port": port, "packet": packet.hex()}
+    addresses = [address] if isinstance(address, str) else list(address)
+    payload = {
+        "address": addresses[0],
+        "addresses": addresses,
+        "port": port,
+        "packet": packet.hex(),
+    }
     if sender_url == SUPERVISOR_SENDER:
         await _async_inject_stdin(hass, payload)
         return
