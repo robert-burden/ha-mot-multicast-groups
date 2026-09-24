@@ -131,7 +131,7 @@ def derive_group_session_id(operational_key: bytes) -> int:
 
 
 def multicast_address_for(fabric_id: int, group_id: int) -> str:
-    """Per-group IPv6 address: FF35:0040:FD<FabricId>00:<GroupId>."""
+    """CHIP BuildMatterPerGroupMulticastAddress: FF35:0040:FD + FabricId + 00 + GroupId."""
     packed = (
         b"\xff\x35\x00\x40\xfd"
         + int(fabric_id).to_bytes(8, "big")

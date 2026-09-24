@@ -321,7 +321,7 @@ class MatterGroupController:
                         encoded.port,
                     )
                     self.last_send_path = "groupcast_local"
-                _LOGGER.debug(
+                _LOGGER.info(
                     "Sent Matter groupcast %s to %s session=%s counter=%s via %s",
                     invoke.command_name,
                     encoded.multicast_address,

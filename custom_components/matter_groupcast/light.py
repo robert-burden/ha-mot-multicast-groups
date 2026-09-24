@@ -169,6 +169,8 @@ class MatterGroupcastLight(LightEntity):
             kelvin=int(kelvin) if kelvin is not None else None,
             transition_s=kwargs.get(ATTR_TRANSITION, 0),
         )
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._controller.async_turn_off()
+        self.async_write_ha_state()

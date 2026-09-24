@@ -1,8 +1,10 @@
 """Host-network UDP injector for Matter group multicast.
 
 The Home Assistant integration encodes the Matter group message. This add-on
-only puts the datagram on the host's IPv6 stack so the Thread border router
-can forward it.
+puts that datagram on every host IPv6 multicast interface, including the
+Thread wpan device. CHIP does the same: group messages are sent on each
+up multicast interface, not only the LAN NIC. Sending solely on eno1 never
+reaches Thread bulbs unless the border router already has an MLR listener.
 """
 
 from __future__ import annotations
@@ -17,15 +19,28 @@ LISTEN_PORT = 5599
 MATTER_UDP_PORT = 5540
 MAX_PACKET = 1280
 PREFERRED_IFACES = ("eno1", "eth0", "end0", "enp1s0", "enp0s3", "enp0s25")
+THREAD_PREFIXES = ("wpan", "otbr", "openthread", "spinel")
+SKIP_EXACT = {"lo", "docker0", "hassio", "flannel.1"}
+SKIP_PREFIXES = ("veth", "br-", "docker", "hassio", "flannel")
 
 
-def _backbone_iface() -> tuple[int, str | None]:
-    """LAN interface index and a global/ULA IPv6 source address, if any."""
-    names = {name: idx for idx, name in socket.if_nameindex()}
-    by_index: dict[int, str] = {idx: name for name, idx in names.items()}
-    preferred_idx = next((names[n] for n in PREFERRED_IFACES if n in names), None)
+def iface_allowed(name: str) -> bool:
+    if name in SKIP_EXACT:
+        return False
+    return not any(name.startswith(prefix) for prefix in SKIP_PREFIXES)
 
-    best: tuple[int, str | None] | None = None
+
+def is_thread_iface(name: str) -> bool:
+    return any(name.startswith(prefix) for prefix in THREAD_PREFIXES)
+
+
+def _multicast_ifaces() -> list[tuple[int, str | None, str]]:
+    """(ifindex, unicast source, name) for each host iface that can groupcast."""
+    names = {name: idx for idx, name in socket.if_nameindex() if iface_allowed(name)}
+    by_index = {idx: name for name, idx in names.items()}
+    sources: dict[int, str] = {}
+    thread_linklocal: dict[int, str] = {}
+
     proc = Path("/proc/net/if_inet6")
     if proc.is_file():
         for line in proc.read_text().splitlines():
@@ -33,34 +48,48 @@ def _backbone_iface() -> tuple[int, str | None]:
             if len(parts) < 6:
                 continue
             raw, idx_hex, _plen, scope_hex, _flags, ifname = parts[:6]
-            if ifname in {"lo", "hassio", "docker0", "flannel.1"}:
-                continue
-            scope = int(scope_hex, 16)
-            if scope & 0x20:  # link-local
+            if not iface_allowed(ifname):
                 continue
             idx = int(idx_hex, 16)
+            names.setdefault(ifname, idx)
+            by_index[idx] = ifname
             try:
                 addr = str(IPv6Address(bytes.fromhex(raw)))
             except ValueError:
                 continue
-            if preferred_idx is not None and idx == preferred_idx:
-                return idx, addr
-            if best is None:
-                best = (idx, addr)
-            elif by_index.get(idx) in PREFERRED_IFACES:
-                best = (idx, addr)
-    if best:
-        return best
-    if preferred_idx is not None:
-        return preferred_idx, None
-    return 0, None
+            scope = int(scope_hex, 16)
+            if scope & 0x20:  # link-local
+                if is_thread_iface(ifname):
+                    thread_linklocal.setdefault(idx, addr)
+                continue
+            sources.setdefault(idx, addr)
+
+    targets: list[tuple[int, str | None, str]] = []
+    seen: set[int] = set()
+
+    def add(idx: int, src: str | None, name: str) -> None:
+        if idx in seen or not name:
+            return
+        seen.add(idx)
+        targets.append((idx, src, name))
+
+    for preferred in PREFERRED_IFACES:
+        if preferred in names:
+            idx = names[preferred]
+            add(idx, sources.get(idx), preferred)
+    for idx, name in sorted(by_index.items(), key=lambda item: item[1]):
+        if is_thread_iface(name):
+            add(idx, sources.get(idx) or thread_linklocal.get(idx), name)
+    for idx, src in sources.items():
+        add(idx, src, by_index.get(idx, f"if{idx}"))
+    return targets
 
 
-def send_multicast(address: str, port: int, packet: bytes) -> None:
-    ifindex, src = _backbone_iface()
+def _send_one(address: str, port: int, packet: bytes, ifindex: int, src: str | None, name: str) -> None:
     sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 64)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
         if ifindex:
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, ifindex)
         if src:
@@ -68,11 +97,28 @@ def send_multicast(address: str, port: int, packet: bytes) -> None:
         sock.sendto(packet, (address, port, 0, ifindex))
         print(
             f"matter-groupcast: sent {len(packet)} bytes to [{address}]:{port} "
-            f"ifindex={ifindex} src={src}",
+            f"iface={name} ifindex={ifindex} src={src}",
             flush=True,
         )
     finally:
         sock.close()
+
+
+def send_multicast(address: str, port: int, packet: bytes) -> None:
+    targets = _multicast_ifaces()
+    if not targets:
+        raise OSError("no IPv6 multicast interface")
+    errors: list[str] = []
+    sent = 0
+    for ifindex, src, name in targets:
+        try:
+            _send_one(address, port, packet, ifindex, src, name)
+            sent += 1
+        except OSError as err:
+            errors.append(f"{name}: {err}")
+            print(f"matter-groupcast: send failed on {name}: {err}", flush=True)
+    if sent == 0:
+        raise OSError("; ".join(errors) or "multicast send failed")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -89,14 +135,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.rstrip("/") == "/health":
-            ifindex, src = _backbone_iface()
+            ifaces = [
+                {"ifindex": idx, "src": src, "name": name} for idx, src, name in _multicast_ifaces()
+            ]
             self._json(
                 200,
                 {
                     "ok": True,
                     "role": "matter-groupcast-sender",
-                    "ifindex": ifindex,
-                    "src": src,
+                    "ifaces": ifaces,
+                    "ifindex": ifaces[0]["ifindex"] if ifaces else 0,
+                    "src": ifaces[0]["src"] if ifaces else None,
                 },
             )
             return
@@ -166,12 +215,12 @@ def _stdin_loop() -> None:
 def main() -> None:
     import threading
 
-    ifindex, src = _backbone_iface()
+    ifaces = _multicast_ifaces()
     threading.Thread(target=_stdin_loop, name="stdin", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
+    summary = ", ".join(f"{name}({idx}/{src})" for idx, src, name in ifaces) or "none"
     print(
-        f"matter-groupcast: listening on 0.0.0.0:{LISTEN_PORT} "
-        f"backbone ifindex={ifindex} src={src}",
+        f"matter-groupcast: listening on 0.0.0.0:{LISTEN_PORT} ifaces=[{summary}]",
         flush=True,
     )
     server.serve_forever()

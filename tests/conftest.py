@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 GROUP_SEND = ROOT / "custom_components" / "matter_groupcast" / "group_send.py"
 SENDER_URLS = ROOT / "custom_components" / "matter_groupcast" / "sender_urls.py"
+SENDER = ROOT / "matter_groupcast_sender" / "server.py"
 
 
 def _load(path: Path, name: str):
@@ -22,3 +23,4 @@ def _load(path: Path, name: str):
 
 group_send = _load(GROUP_SEND, "matter_groupcast_group_send")
 sender_urls = _load(SENDER_URLS, "matter_groupcast_sender_urls")
+sender = _load(SENDER, "matter_groupcast_sender_server")

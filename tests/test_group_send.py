@@ -5,13 +5,31 @@ import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 
 from tests.conftest import group_send as gs
+from tests.conftest import sender as sender_mod
 from tests.conftest import sender_urls as su
 
 
-def test_multicast_address_matches_spec_for_fabric_2() -> None:
+def test_multicast_address_matches_chip_layout() -> None:
+    packed = __import__("socket").inet_pton
     addr = gs.multicast_address_for(2, 0x0D01)
-    packed = __import__("socket").inet_pton(__import__("socket").AF_INET6, addr)
-    assert packed == bytes.fromhex("ff350040fd0000000000000002000d01")
+    assert packed(__import__("socket").AF_INET6, addr) == bytes.fromhex(
+        "ff350040fd0000000000000002000d01"
+    )
+    # Fabric 0x7D, group 0x07D0: low 8 fabric bits sit in the 32-bit group field.
+    addr_7d = gs.multicast_address_for(0x7D, 0x07D0)
+    assert packed(__import__("socket").AF_INET6, addr_7d) == bytes.fromhex(
+        "ff350040fd000000000000007d0007d0"
+    )
+
+
+def test_sender_skips_docker_and_keeps_thread() -> None:
+    assert sender_mod.iface_allowed("eno1")
+    assert sender_mod.iface_allowed("wpan0")
+    assert sender_mod.is_thread_iface("wpan0")
+    assert not sender_mod.iface_allowed("lo")
+    assert not sender_mod.iface_allowed("docker0")
+    assert not sender_mod.iface_allowed("hassio")
+    assert not sender_mod.iface_allowed("veth1a2b3c")
 
 
 def test_operational_key_is_16_bytes_and_key_dependent() -> None:
